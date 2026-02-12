@@ -1,0 +1,7 @@
+<Solution>
+  <Configurations>
+    <Platform Name="x64" />
+    <Platform Name="x86" />
+  </Configurations>
+  <Project Path="MatrixMultiplicationMPI/MatrixMultiplicationMPI.vcxproj" Id="99b0c8ba-15a7-4e2f-a28a-b881e0d6a2b0" />
+</Solution>
