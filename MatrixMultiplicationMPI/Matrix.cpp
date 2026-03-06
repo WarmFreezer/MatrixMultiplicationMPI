@@ -10,6 +10,8 @@
 	1 - Matrix B Column
 	2 - Result Value, Position
 	3 - Position
+    4 - Finished Tasks
+    5 - Task For Worker
 */
 
 template <typename T>
@@ -18,6 +20,8 @@ static vector<T> Flat(const vector<vector<T>> v);
 template <typename T>
 static vector<vector<T>> Grid(const vector<T> v, int n, int k);
 
+static void SendCalculation(int dest, int row, int col, vector<vector<double>> &a, vector<vector<double>> &b, int n, int k, int m);
+
 static void CrossProduct(int n, int k, int m, vector<vector<double>>& a, vector<vector<double>>& b, vector<vector<double>>& c)
 {
     int size, rank;
@@ -25,90 +29,117 @@ static void CrossProduct(int n, int k, int m, vector<vector<double>>& a, vector<
     MPI_Comm_size(MPI_COMM_WORLD, &size);
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
 
-    //Data type to skip to next row in matrix B
-    MPI_Datatype skipMDouble;
-    MPI_Type_vector(k, 1, m, MPI_DOUBLE, &skipMDouble);
-    MPI_Type_commit(&skipMDouble);
+    MPI_Status status;
 
     if (rank == 0)
     {
-        //Create buffers for input vectors. Flattened to keep data contiguous.
-        vector<double> flatA = Flat(a);
-        vector<double> flatB = Flat(b);
+		int totalTasks = n * m;
 
-        double* bufA = flatA.data();
-        double* bufB = flatB.data();
+        int actual_source;
 
-        for (int row = 0; row < n; row++)
+        // Phase 1: Distribute 1 task to each worker
+		int distributedTasks = 0;
+        int row = 0;
+        int col = 0;
+        for (row; row < n; row++)
         {
 			//Master process distributes rows and columns to worker processes
-            for (int col = 0; col < m; col++)
-            {
-				//Determine destination and starting points in buffers
+            for (col; col < m; col++)
+			{
                 int dest = (((row * m) + col) % (size - 1)) + 1;
-                void* startA = bufA + static_cast<size_t>(k * row);
-                void* startB = bufB + static_cast<size_t>(k * col);
+				SendCalculation(dest, row, col, a, b, n, k, m);
+				distributedTasks++;
 
-                //Send Position
-				int position[2] = { row, col };
-				MPI_Send(&position, 2, MPI_INT, dest, 3, MPI_COMM_WORLD);
+                if (distributedTasks % (size - 1) == 0)
+                {
+                    col++;
+                    if (col >= m)
+                    {
+                        col = 0;
+                        row++;
+                    }
 
-				//Send the necessary data to the worker process
-				MPI_Send(startA, k, MPI_DOUBLE, dest, 0, MPI_COMM_WORLD);
-				MPI_Send(startB, 1, skipMDouble, dest, 1, MPI_COMM_WORLD);
-
-                //std::cout << "Sent [" << row << ", " << col << "] to " << dest << std::endl;
+                    goto phase2;
+				}
             }
-        }
-        //After distribution, master process awaits results from worker processes
-        for (int row = 0; row < n; row++)
+            col = 0;
+        }	
+        phase2:
+		//Phase 2: Collect results from fast tasks, distributing new tasks as workers become available
+		int tasksReceived = 0;
+        for (; row < n; row++)
         {
-            for (int col = 0; col < m; col++)
+            for (; col < m; col++)
             {
-                int source = (((row * m) + col) % (size - 1)) + 1;
-
-                //Receive result
                 double result[3];
+                MPI_Recv(&result, 3, MPI_DOUBLE, MPI_ANY_SOURCE, 2, MPI_COMM_WORLD, &status);
+				tasksReceived++;
+                actual_source = status.MPI_SOURCE;
 
-                MPI_Recv(&result, 3, MPI_DOUBLE, source, 2, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+                int dest = actual_source;
+				SendCalculation(dest, row, col, a, b, n, k, m);
 
-				//std::cout << "Received result for [" << result[1] << ", " << result[2] << "] from " << source << std::endl;
-
-                int x = result[1];
+				int x = result[1];
                 int y = result[2];
-
                 //Assign result to correct position in result matrix
-                c[x][y] = result[0];
+				c[x][y] = result[0];
             }
+            col = 0;
+        }
+
+        //After distribution, master process awaits results from remaining processes
+        while (tasksReceived < totalTasks)
+        {
+            //Receive result
+            double result[3];
+
+            MPI_Recv(&result, 3, MPI_DOUBLE, MPI_ANY_SOURCE, 2, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+			tasksReceived++;
+
+			//std::cout << "Received result for [" << result[1] << ", " << result[2] << "] from " << source << std::endl;
+            int x = result[1];
+            int y = result[2];
+
+            //Assign result to correct position in result matrix
+            c[x][y] = result[0];
+        }
+
+		for (int i = 1; i < size; i++)
+        {
+            MPI_Send(NULL, 0, MPI_INT, i, 4, MPI_COMM_WORLD);
         }
     }
     //Worker processes receive rows and columns, compute the dot product, and send back the result
     else
     {
-        int totalTasks = n * m;
-        int workers = (size - 1);
-        
-		int baseTasks = totalTasks / workers;
-        int remainder = totalTasks % workers;
+        //Set up for receive
+        double* buf = new double[2 + k + k];
+        int position[2];
+        double* rowA = new double[k];
+        double* colB = new double[k];
 
-		int myTasks = baseTasks + (rank <= remainder ? 1 : 0);
-
-		for (int task = 0; task < myTasks; task++)
+		while (true)
         {
-			//Receive Position
-            int position[2];
-            MPI_Recv(position, 2, MPI_INT, 0, 3, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+            MPI_Probe(0, MPI_ANY_TAG, MPI_COMM_WORLD, &status);
+            if (status.MPI_TAG == 4)
+            {
+                MPI_Recv(NULL, 0, MPI_INT, 0, 4, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+                break;
+            }
 
-			//std::cout << "Received [" << position[0] << ", " << position[1] << "] at " << rank << std::endl;
+            MPI_Recv(buf, 2 + k + k, MPI_DOUBLE, 0, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+            position[0] = (int)buf[0];
+			position[1] = (int)buf[1];
 
-            //Receive data
-            double* rowA = new double[k];
-            double* colB = new double[k];
+			for (int i = 0; i < k; i++)
+            {
+                rowA[i] = buf[2 + i];
+            }
 
-            MPI_Recv(rowA, k, MPI_DOUBLE, 0, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-            MPI_Recv(colB, k, MPI_DOUBLE, 0, 1, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-
-			//std::cout << "Received [" << position[0] << ", " << position[1] << "] at " << rank << std::endl;
+			for (int i = 0; i < k; i++)
+            {
+                colB[i] = buf[2 + k + i];
+            }
 
             //Calculate sum of products
             double sum = 0;
@@ -122,10 +153,11 @@ static void CrossProduct(int n, int k, int m, vector<vector<double>>& a, vector<
             //Send back result and position
             double result[] = { sum, position[0], position[1]};
             MPI_Send(&result, 3, MPI_DOUBLE, 0, 2, MPI_COMM_WORLD);
-
-            delete[] rowA;
-            delete[] colB;
         }
+
+        delete[] buf;
+        delete[] rowA;
+        delete[] colB;
     }
 
     // Synchronize all processes before exiting
@@ -161,4 +193,25 @@ static vector<vector<T>> Grid(const vector<T> v, int n, int k)
     }
 
     return result;
+}
+
+static void SendCalculation(int dest, int row, int col, vector<vector<double>> &a, vector<vector<double>> &b, int n, int k, int m)
+{
+    vector<double> toSend;
+    toSend.push_back(row);
+	toSend.push_back(col);
+
+	for (int i = 0; i < k; i++)
+    {
+        toSend.push_back(a[row][i]);
+    }
+
+	for (int i = 0; i < k; i++)
+    {
+        toSend.push_back(b[i][col]);
+    }
+    
+	void* buf = toSend.data();
+
+	MPI_Send(buf, 2 + k + k, MPI_DOUBLE, dest, 0, MPI_COMM_WORLD);
 }

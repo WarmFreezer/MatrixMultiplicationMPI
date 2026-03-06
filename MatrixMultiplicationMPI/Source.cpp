@@ -65,9 +65,11 @@ int main(int argc, char** argv)
 	vector<vector<double>> b = {};
 	vector<vector<double>> c = {};
 
+	std::chrono::steady_clock::time_point start;
+
 	if (rank == 0)
 	{
-		cout << "Successfully broadcasted dimensions to all processes. n: " << n << " k: " << k << " m: " << m << "\n";
+		std::cerr << "Process " << rank << ": Populating matrices and broadcasting dimensions to all processes.\n";
 
 		a = vector<vector<double>>(n, vector<double>(k));
 		b = vector<vector<double>>(k, vector<double>(m));
@@ -75,20 +77,33 @@ int main(int argc, char** argv)
 
 		PopulateMatrix(a);
 		PopulateMatrix(b);
+
+		start = std::chrono::high_resolution_clock::now();
 	}
 
 	CrossProduct(n, k, m, a, b, c);
 
 	if (rank == 0)
 	{
-		PrintMatrix(a);
-		cout << std::endl;
-		PrintMatrix(b);
-		cout << std::endl;
-		PrintMatrix(c);
+		auto end = std::chrono::high_resolution_clock::now();
+
+		auto elapsed = end - start;
+		cout << elapsed.count() << std::endl;
+
+		if (n <= 10 && k <= 10 && m <= 10)
+		{
+			PrintMatrix(a);
+			cout << std::endl;
+			PrintMatrix(b);
+			cout << std::endl;
+			PrintMatrix(c);
+		}
+
+		cout << "Successfully calculated cross product of A and B. Result stored in C.\n";
 	}
 
 	MPI_Finalize();
+
 
 	return 0;
 }
